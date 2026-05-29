@@ -3534,6 +3534,8 @@ const MONTHLY_RESET_KEY='painel_gs_monthly_reset_v1';
 const DAILY_RESET_KEY='painel_gs_daily_reset_v1';
 const AUDIT_RESET_AT_KEY='painel_gs_audit_reset_at_v1';
 const PRODUCTIVITY_KEY='painel_gs_daily_productivity_v1';
+const DAILY_REPORT_SNAPSHOT_KEY='painel_gs_daily_report_snapshots_v1';
+const RANKING_SNAPSHOT_KEY='painel_gs_ranking_snapshots_v1';
 const REGULATORS=['Emerson','Modesto','Saymom','Tiago','Tavares'];
 const USER_ACCOUNTS={
   'Lidiane':{password:'gestao2026',role:'edit'},
@@ -4048,6 +4050,9 @@ function canEdit(){
   const account=currentAccount();
   return !!account && account.role==='edit';
 }
+function canDeleteAudit(){
+  return ['Lidiane','Guilherme'].includes(currentUser());
+}
 function openLogin(page=''){
   pendingLoginPage=page || '';
   document.getElementById('login-msg').textContent='';
@@ -4179,6 +4184,29 @@ function replaceSharedProductivity(rows){
   if(changed) saveJson(PRODUCTIVITY_KEY,next);
   return changed;
 }
+function replaceSharedDailyReports(rows){
+  const next={};
+  for(const row of rows||[]){
+    const dateKey=String(row.dateKey||'').trim();
+    if(!dateKey) continue;
+    if(!next[dateKey]) next[dateKey]={};
+    next[dateKey][row.mode||'regulator']=row;
+  }
+  const changed=JSON.stringify(loadJson(DAILY_REPORT_SNAPSHOT_KEY,{}))!==JSON.stringify(next);
+  if(changed) saveJson(DAILY_REPORT_SNAPSHOT_KEY,next);
+  return changed;
+}
+function replaceSharedRankings(rows){
+  const next={};
+  for(const row of rows||[]){
+    const monthKey=String(row.monthKey||'').trim();
+    if(!monthKey) continue;
+    next[monthKey]=row;
+  }
+  const changed=JSON.stringify(loadJson(RANKING_SNAPSHOT_KEY,{}))!==JSON.stringify(next);
+  if(changed) saveJson(RANKING_SNAPSHOT_KEY,next);
+  return changed;
+}
 function mergeSharedAuditReviewsOld(rows){
   const local=getAuditReviews();
   const resetAt=Number(localStorage.getItem(AUDIT_RESET_AT_KEY)||0);
@@ -4302,10 +4330,19 @@ function mergeSharedResets(rows){
     const type=String(row.type||'').toLowerCase();
     if(type==='daily' && row.dateKey && (!daily[row.dateKey] || daily[row.dateKey]<resetAt)){
       daily[row.dateKey]=resetAt;
+      const productivity=loadJson(PRODUCTIVITY_KEY,{});
+      delete productivity[row.dateKey];
+      saveJson(PRODUCTIVITY_KEY,productivity);
+      const reports=loadJson(DAILY_REPORT_SNAPSHOT_KEY,{});
+      delete reports[row.dateKey];
+      saveJson(DAILY_REPORT_SNAPSHOT_KEY,reports);
       changed=true;
     }
     if(type==='ranking' && row.monthKey && (!ranking[row.monthKey] || ranking[row.monthKey]<resetAt)){
       ranking[row.monthKey]=resetAt;
+      const rankings=loadJson(RANKING_SNAPSHOT_KEY,{});
+      delete rankings[row.monthKey];
+      saveJson(RANKING_SNAPSHOT_KEY,rankings);
       changed=true;
     }
     if(type==='monthly' && row.monthKey && (!monthly[row.monthKey] || monthly[row.monthKey]<resetAt)){
@@ -4383,6 +4420,8 @@ async function syncSharedAudits(){
       changed=replaceSharedDelays(data.data.atrasos) || changed;
       changed=mergeSharedResets(data.data.resets) || changed;
       changed=replaceSharedProductivity(data.data.produtividadeDiaria) || changed;
+      changed=replaceSharedDailyReports(data.data.relatorioDiario) || changed;
+      changed=replaceSharedRankings(data.data.rankingMensal) || changed;
       changed=mergeSharedConfig(data.data.config) || changed;
     }else if(data && Array.isArray(data.rows)){
       sharedDbReady=true;
@@ -4453,6 +4492,25 @@ async function pushSharedAuditReview(review){
   }catch(e){
     setStatus('err','Falha ao salvar auditoria no banco.');
     alert(`Não foi possível salvar a auditoria no banco de dados. Tente novamente.\n\n${e.message||e}`);
+    return false;
+  }
+}
+async function deleteSharedAuditReview(proc){
+  const url=auditApiUrl();
+  if(!url) return false;
+  const params=new URLSearchParams({
+    action:'deleteAudit',
+    proc:proc || '',
+  });
+  try{
+    const result=await jsonp(`${url}?${params.toString()}`);
+    if(!result || result.ok!==true) throw new Error(result && result.error ? result.error : 'Falha ao excluir auditoria');
+    await syncSharedAudits();
+    setStatus('ok',`Auditoria ${proc||''} excluída do banco.`);
+    return true;
+  }catch(e){
+    setStatus('err','Falha ao excluir auditoria.');
+    alert(`Não foi possível excluir o registro da auditoria.\n\n${e.message||e}`);
     return false;
   }
 }
@@ -4574,6 +4632,48 @@ async function pushSharedProductivity(row){
     return true;
   }catch(e){
     alert(`Não foi possível salvar a produtividade no banco de dados.\n\n${e.message||e}`);
+    return false;
+  }
+}
+async function pushSharedDailyReport(row){
+  const url=auditApiUrl();
+  if(!url) return false;
+  const params=new URLSearchParams({
+    action:'upsertDailyReport',
+    id:row.id || `${row.dateKey}|${row.mode}`,
+    dateKey:row.dateKey || '',
+    mode:row.mode || '',
+    savedBy:row.savedBy || currentUser() || '',
+    savedAt:row.savedAt || new Date().toISOString(),
+    total:String(row.total || 0),
+    rows:JSON.stringify(row.rows || []),
+  });
+  try{
+    const result=await jsonp(`${url}?${params.toString()}`);
+    if(!result || result.ok!==true) throw new Error(result && result.error ? result.error : 'Falha ao salvar relatório diário');
+    return true;
+  }catch(e){
+    alert(`Não foi possível salvar o relatório diário no banco de dados.\n\n${e.message||e}`);
+    return false;
+  }
+}
+async function pushSharedRanking(row){
+  const url=auditApiUrl();
+  if(!url) return false;
+  const params=new URLSearchParams({
+    action:'upsertRanking',
+    id:row.id || row.monthKey,
+    monthKey:row.monthKey || '',
+    savedBy:row.savedBy || currentUser() || '',
+    savedAt:row.savedAt || new Date().toISOString(),
+    rows:JSON.stringify(row.rows || []),
+  });
+  try{
+    const result=await jsonp(`${url}?${params.toString()}`);
+    if(!result || result.ok!==true) throw new Error(result && result.error ? result.error : 'Falha ao salvar ranking');
+    return true;
+  }catch(e){
+    alert(`Não foi possível salvar o ranking no banco de dados.\n\n${e.message||e}`);
     return false;
   }
 }
@@ -4957,6 +5057,26 @@ function hasAuditReview(proc){
 
 function auditReviewDate(review){
   return review.auditReleasedAt || review.updatedAt || '';
+}
+
+async function deleteAuditReview(proc){
+  if(!canDeleteAudit()){
+    alert('Somente Lidiane ou Guilherme podem excluir registros da auditoria.');
+    return;
+  }
+  const key=auditReviewKey(proc);
+  if(!key){ alert('Registro não encontrado.'); return; }
+  if(!confirm(`Excluir o registro de auditoria do protocolo ${proc}? Essa ação remove do banco de dados para todos os usuários.`)) return;
+  const ok=await deleteSharedAuditReview(key);
+  if(!ok) return;
+  const reviews=getAuditReviews();
+  delete reviews[key];
+  saveJson(AUDIT_REVIEWS_KEY,reviews);
+  closeAuditReview();
+  renderAudit();
+  renderDailyReport();
+  renderRanking();
+  renderMonthlySummary();
 }
 
 function setAuditSearch(value){
@@ -5383,6 +5503,7 @@ function renderAuditEntryModal(){
       </div>
       <div class="audit-save-row">
         ${canEdit()?`<button type="button" class="btn btn-primary" onclick='saveAuditEntry(${JSON.stringify(safe)})'>Salvar auditoria</button>`:''}
+        ${proc && canDeleteAudit()?`<button type="button" class="btn btn-ghost" onclick='deleteAuditReview(${JSON.stringify(proc)})'>Excluir registro</button>`:''}
         <button type="button" class="btn btn-ghost" onclick="closeAuditReview()">Cancelar</button>
       </div>
     </div>`;
@@ -5596,6 +5717,49 @@ function dailyProductivityRows(dateKey){
   return [...byReg.values()].map(row=>({...row,savedBy:currentUser(),savedAt}));
 }
 
+function dailyReportSnapshotRows(dateKey, mode){
+  const releases=loadJson(RELEASES_KEY, [])
+    .filter(r=>r.dateKey===dateKey && !r.ignored && isRegulationRelease(r));
+  if(mode==='delays'){
+    return releases
+      .filter(r=>delayValidated(r))
+      .map(r=>({proc:r.proc,reg:releaseRegName(r),assoc:releaseAssocName(r),delay:fmtDelay(delayHours(r)),reason:delayInfo(r).reason||''}));
+  }
+  if(mode==='audit'){
+    return auditReportForDate(dateKey).map(({review})=>({
+      proc:review.proc||'',
+      reg:auditReviewRegName(review),
+      assoc:auditReviewAssocName(review),
+      auditor:review.auditor||'',
+      hasErrors:auditReviewHasErrors(review),
+      errorType:auditReviewErrorType(review),
+      auditReleasedAt:auditReviewDate(review),
+    }));
+  }
+  const byGroup=new Map();
+  for(const r of releases){
+    const name=mode==='association' ? releaseAssocName(r) : releaseRegName(r);
+    if(!byGroup.has(name)) byGroup.set(name,{name,total:0,protocols:[]});
+    const row=byGroup.get(name);
+    row.total++;
+    row.protocols.push({proc:r.proc,reg:releaseRegName(r),assoc:releaseAssocName(r),completedAt:r.completedAt||'',expired:!!r.expired});
+  }
+  return [...byGroup.values()].sort((a,b)=>b.total-a.total || a.name.localeCompare(b.name));
+}
+
+function dailyReportSnapshot(dateKey, mode){
+  const rows=dailyReportSnapshotRows(dateKey, mode);
+  return {
+    id:`${dateKey}|${mode}`,
+    dateKey,
+    mode,
+    total:rows.reduce((sum,row)=>sum+(Number(row.total)||1),0),
+    rows,
+    savedBy:currentUser(),
+    savedAt:new Date().toISOString(),
+  };
+}
+
 function productivitySaved(dateKey){
   return !!(loadJson(PRODUCTIVITY_KEY,{})[dateKey] || []).length;
 }
@@ -5615,9 +5779,23 @@ async function saveDailyProductivity(){
     const ok=await pushSharedProductivity(row);
     if(!ok) return;
   }
+  for(const mode of ['regulator','association','audit','delays']){
+    const ok=await pushSharedDailyReport(dailyReportSnapshot(dateKey, mode));
+    if(!ok) return;
+  }
+  const ranking=rankingRowsForMonth(dateKey.slice(0,7));
+  const rankingRow={id:dateKey.slice(0,7),monthKey:dateKey.slice(0,7),rows:ranking,savedBy:currentUser(),savedAt:new Date().toISOString()};
+  const rankingOk=await pushSharedRanking(rankingRow);
+  if(!rankingOk) return;
   const map=loadJson(PRODUCTIVITY_KEY,{});
   map[dateKey]=rows;
   saveJson(PRODUCTIVITY_KEY,map);
+  const reportMap=loadJson(DAILY_REPORT_SNAPSHOT_KEY,{});
+  reportMap[dateKey]=Object.fromEntries(['regulator','association','audit','delays'].map(mode=>[mode,dailyReportSnapshot(dateKey, mode)]));
+  saveJson(DAILY_REPORT_SNAPSHOT_KEY,reportMap);
+  const rankingMap=loadJson(RANKING_SNAPSHOT_KEY,{});
+  rankingMap[dateKey.slice(0,7)]=rankingRow;
+  saveJson(RANKING_SNAPSHOT_KEY,rankingMap);
   await syncSharedAudits();
   alert('Produtividade do dia salva no banco de dados.');
   renderDailyReport();
@@ -5812,6 +5990,9 @@ function resetRankingMonth(){
   const map=loadJson(RANKING_RESET_KEY,{});
   map[monthKey]=Date.now();
   saveJson(RANKING_RESET_KEY,map);
+  const rankings=loadJson(RANKING_SNAPSHOT_KEY,{});
+  delete rankings[monthKey];
+  saveJson(RANKING_SNAPSHOT_KEY,rankings);
   pushSharedReset('ranking',{monthKey});
   renderRanking();
 }
@@ -5833,6 +6014,12 @@ function resetDailyReport(){
   const dailyMap=loadJson(DAILY_RESET_KEY,{});
   dailyMap[dateKey]=Date.now();
   saveJson(DAILY_RESET_KEY,dailyMap);
+  const productivity=loadJson(PRODUCTIVITY_KEY,{});
+  delete productivity[dateKey];
+  saveJson(PRODUCTIVITY_KEY,productivity);
+  const reportSnapshots=loadJson(DAILY_REPORT_SNAPSHOT_KEY,{});
+  delete reportSnapshots[dateKey];
+  saveJson(DAILY_REPORT_SNAPSHOT_KEY,reportSnapshots);
   pushSharedReset('daily',{dateKey});
   const releases=loadJson(RELEASES_KEY, []);
   const removedIds=new Set();
