@@ -3390,7 +3390,7 @@ html, body {
           <button type="button" class="report-mode-tab" id="mode-delays" onclick="setReportMode('delays')">Atrasos</button>
         </div>
         <button class="btn btn-primary" onclick="renderDailyReport()">Verificar resultados</button>
-        <button class="btn btn-primary" data-edit-only onclick="openManualEntry('report')">+ Inserir protocolo liberado</button>
+        <button class="btn btn-primary" data-edit-only onclick="openManualEntry('report')">+ Adicionar liberação</button>
         <div class="sync-actions">
           <button class="btn btn-primary" id="daily-productivity-btn" onclick="saveDailyProductivity()">Salvar produtividade do dia</button>
           <button class="btn btn-ghost" onclick="exportDailyPdf()">Exportar PDF</button>
@@ -3519,7 +3519,7 @@ const MONTHS = ['janeiro','fevereiro','março','abril','maio','junho','julho','a
 const WS=9, WE=18;
 const ONE_DAY=86400000;
 const DEFAULT_URL='https://docs.google.com/spreadsheets/d/1ivBNAaHtZbtHQRWmuUAPmyaVnRe8Oa1jWmuVE_l4LT8/edit?usp=sharing';
-const DEFAULT_AUDIT_API_URL='https://script.google.com/macros/s/AKfycbwTqr_jDadY25l7Vr1TpMct9J-ERRprhq5Uk-lmgderotHvw5zNvGa1LD6WHIO14q2h/exec';
+const DEFAULT_AUDIT_API_URL='https://script.google.com/macros/s/AKfycbz2tq8x9f3uUpcl5n8wFhK9_CRzo7KPkGp2M2wkEQUjYZTt-ZW-g-QBJIgmK9pbXVd6lQ/exec';
 const REFRESH_MS=5*60*1000;
 const SNAPSHOT_KEY='painel_gs_snapshot_v1';
 const RELEASES_KEY='painel_gs_releases_v1';
@@ -3536,6 +3536,7 @@ const AUDIT_RESET_AT_KEY='painel_gs_audit_reset_at_v1';
 const PRODUCTIVITY_KEY='painel_gs_daily_productivity_v1';
 const DAILY_REPORT_SNAPSHOT_KEY='painel_gs_daily_report_snapshots_v1';
 const RANKING_SNAPSHOT_KEY='painel_gs_ranking_snapshots_v1';
+const PANEL_SNAPSHOT_KEY='painel_gs_shared_panel_snapshot_v1';
 const REGULATORS=['Emerson','Modesto','Saymom','Tiago','Tavares'];
 const USER_ACCOUNTS={
   'Lidiane':{password:'gestao2026',role:'edit'},
@@ -4207,6 +4208,21 @@ function replaceSharedRankings(rows){
   if(changed) saveJson(RANKING_SNAPSHOT_KEY,next);
   return changed;
 }
+function replaceSharedPanelSnapshot(rows){
+  const next={};
+  for(const row of rows||[]){
+    if(!asBool(row.active)) continue;
+    const proc=normalizeProc(row.proc);
+    if(!proc) continue;
+    next[proc]=typeof row.payload==='string' ? safeJson(row.payload,{proc}) : (row.payload || {proc});
+  }
+  const changed=JSON.stringify(loadJson(PANEL_SNAPSHOT_KEY,{}))!==JSON.stringify(next);
+  if(changed) saveJson(PANEL_SNAPSHOT_KEY,next);
+  return changed;
+}
+function safeJson(value, fallback){
+  try{ return JSON.parse(value || ''); }catch(e){ return fallback; }
+}
 function mergeSharedAuditReviewsOld(rows){
   const local=getAuditReviews();
   const resetAt=Number(localStorage.getItem(AUDIT_RESET_AT_KEY)||0);
@@ -4422,6 +4438,7 @@ async function syncSharedAudits(){
       changed=replaceSharedProductivity(data.data.produtividadeDiaria) || changed;
       changed=replaceSharedDailyReports(data.data.relatorioDiario) || changed;
       changed=replaceSharedRankings(data.data.rankingMensal) || changed;
+      changed=replaceSharedPanelSnapshot(data.data.painelSnapshot) || changed;
       changed=mergeSharedConfig(data.data.config) || changed;
     }else if(data && Array.isArray(data.rows)){
       sharedDbReady=true;
@@ -4468,6 +4485,7 @@ async function pushSharedAuditReview(review){
     proc:review.proc||'',
     assoc:review.assoc||'',
     reg:review.reg||'',
+    regulatedAt:review.regulatedAt||'',
     whereError:review.whereError||'',
     releasedValue:review.releasedValue||'',
     shopValue:review.shopValue||'',
@@ -4677,6 +4695,23 @@ async function pushSharedRanking(row){
     return false;
   }
 }
+async function pushSharedPanelSnapshot(proc, payload, active=true){
+  const url=auditApiUrl();
+  if(!url) return false;
+  const params=new URLSearchParams({
+    action:'upsertPanelSnapshot',
+    proc:normalizeProc(proc),
+    payload:JSON.stringify(payload || {}),
+    active:String(!!active),
+    updatedAt:new Date().toISOString(),
+  });
+  try{
+    const result=await jsonp(`${url}?${params.toString()}`);
+    return !!(result && result.ok===true);
+  }catch(e){
+    return false;
+  }
+}
 
 function loadManualPending(){
   const released=new Set(loadJson(RELEASES_KEY, []).map(r=>normalizeProc(r.proc)));
@@ -4768,6 +4803,7 @@ function manualEntryPayload(){
   }
   const internalDue=addBizHours(arrival,22);
   const realDue=addBizHours(arrival,24);
+  const key=normalizeProc(proc);
   return {
     id:`manual|${key}|${Date.now()}`,
     proc,
@@ -4785,7 +4821,7 @@ function manualEntryPayload(){
   };
 }
 
-function saveManualEntry(){
+async function saveManualEntry(){
   const payload=manualEntryPayload();
   if(!payload) return;
   const key=normalizeProc(payload.proc);
@@ -4830,7 +4866,7 @@ function saveManualEntry(){
     };
     releases.push(release);
     saveJson(RELEASES_KEY, releases.slice(-2500));
-    pushSharedRelease(release);
+    await pushSharedRelease(release);
     renderAudit();
     renderDailyReport();
     renderRanking();
@@ -4840,7 +4876,7 @@ function saveManualEntry(){
     saveJson(MANUAL_PENDING_KEY, pending);
     pushSharedManualProtocol(payload);
     const data=refreshMergedPanel();
-    recordDailyReleases(data.all);
+    await recordDailyReleases(data.all);
   }
   closeManualEntry();
 }
@@ -4908,16 +4944,19 @@ function mergeSnapshotInfo(oldItem, newItem){
   return merged;
 }
 
-function recordDailyReleases(allItems){
+async function recordDailyReleases(allItems){
   const current={};
   for(const item of allItems){
     const key=normalizeProc(item.proc);
     if(key) current[key]=itemToSnapshot(item);
   }
 
-  const previous=loadJson(SNAPSHOT_KEY, null);
+  const sharedPrevious=loadJson(PANEL_SNAPSHOT_KEY, {});
+  const previous=Object.keys(sharedPrevious).length ? sharedPrevious : loadJson(SNAPSHOT_KEY, null);
   if(!previous){
     saveJson(SNAPSHOT_KEY, current);
+    saveJson(PANEL_SNAPSHOT_KEY, current);
+    await Promise.all(Object.entries(current).map(([key,item])=>pushSharedPanelSnapshot(key,item,true)));
     return;
   }
 
@@ -4957,7 +4996,8 @@ function recordDailyReleases(allItems){
       updatedAt:now.toISOString(),
     };
     releases.push(release);
-    pushSharedRelease(release);
+    await pushSharedRelease(release);
+    await pushSharedPanelSnapshot(key, old, false);
     known.add(releaseKey);
   }
 
@@ -4970,6 +5010,8 @@ function recordDailyReleases(allItems){
 
   saveJson(RELEASES_KEY, releases.slice(-2500));
   saveJson(SNAPSHOT_KEY, current);
+  saveJson(PANEL_SNAPSHOT_KEY, current);
+  await Promise.all(Object.entries(current).map(([key,item])=>pushSharedPanelSnapshot(key,item,true)));
 }
 
 function auditAssocName(r){
@@ -5149,7 +5191,7 @@ function renderAuditReviewCard(releases){
 
         <div class="audit-field">
           <label for="audit-value-${safe}">Valor liberado</label>
-          <input id="audit-value-${safe}" type="text" inputmode="decimal" value="${escHtml(review.releasedValue || '')}" placeholder="R$ 0,00" />
+          <input id="audit-value-${safe}" type="text" inputmode="decimal" value="${escHtml(formatCurrencyDisplay(review.releasedValue || ''))}" placeholder="R$ 0,00" onblur="formatCurrencyField(this)" />
         </div>
 
         <div class="audit-field full">
@@ -5204,7 +5246,7 @@ async function saveAuditReview(proc, safe){
   const typeEls=[...document.querySelectorAll(`input[name="audit-error-type-${safe}"]:checked`)];
   const saved=await setAuditReview(proc, {
     whereError: whereEl ? whereEl.value.trim() : '',
-    releasedValue: valueEl ? valueEl.value.trim() : '',
+    releasedValue: valueEl ? normalizeCurrencyValue(valueEl.value) : '',
     errorTypes: typeEls.map(el=>el.value),
     budgetSize: getRadioValue(`audit-size-${safe}`),
     auditor: getRadioValue(`audit-auditor-${safe}`) || currentUser(),
@@ -5404,6 +5446,46 @@ function auditReviewReductionPct(review){
   const base=auditReviewShopValue(review);
   return base ? Math.round((auditReviewReduction(review)/base)*100) : 0;
 }
+function dateKeyFromStoredDate(value){
+  const raw=String(value||'').trim();
+  if(!raw) return '';
+  const m=raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if(m) return `${m[1]}-${m[2]}-${m[3]}`;
+  const d=new Date(raw);
+  return Number.isNaN(d.getTime()) ? '' : dk(d);
+}
+function dateInputValue(value){
+  return dateKeyFromStoredDate(value);
+}
+function auditRegulatedDateKey(review){
+  return dateKeyFromStoredDate(review.regulatedAt || review.regulatedDate || '');
+}
+function auditRegulationItem(review){
+  const dateKey=auditRegulatedDateKey(review);
+  return {
+    id:`audit-regulated|${dateKey}|${auditReviewKey(review.proc)}`,
+    proc:review.proc || '',
+    reg:auditReviewRegName(review),
+    assoc:auditReviewAssocName(review),
+    dateKey,
+    completedAt:review.regulatedAt || dateKey,
+    dueText:'',
+    expired:false,
+    fromAudit:true,
+    review
+  };
+}
+function auditRegulationItems(){
+  return Object.values(getAuditReviews())
+    .filter(review=>review && review.proc && auditRegulatedDateKey(review))
+    .map(auditRegulationItem);
+}
+function auditRegulationItemsForDate(dateKey){
+  return auditRegulationItems().filter(item=>item.dateKey===dateKey);
+}
+function auditRegulationItemsForMonth(monthKey){
+  return auditRegulationItems().filter(item=>String(item.dateKey||'').startsWith(monthKey));
+}
 function auditAssociationOptions(selected=''){
   const names=activeAssociationNames();
   for(const review of Object.values(getAuditReviews())){
@@ -5454,16 +5536,20 @@ function renderAuditEntryModal(){
         <select id="audit-reg-${safe}" ${disabled}>${auditRegulatorOptions(auditReviewRegName(review)==='Sem regulador'?'':auditReviewRegName(review))}</select>
       </div>
       <div class="audit-field">
+        <label for="audit-regulated-at-${safe}">Data regulada pelo regulador</label>
+        <input id="audit-regulated-at-${safe}" type="date" value="${escHtml(dateInputValue(review.regulatedAt||''))}" ${disabled} />
+      </div>
+      <div class="audit-field">
         <label for="audit-shop-${safe}">Valor recebido oficina</label>
-        <input id="audit-shop-${safe}" type="text" inputmode="decimal" value="${escHtml(review.shopValue||review.receivedValue||'')}" placeholder="R$ 0,00" ${disabled} />
+        <input id="audit-shop-${safe}" type="text" inputmode="decimal" value="${escHtml(formatCurrencyDisplay(review.shopValue||review.receivedValue||''))}" placeholder="R$ 0,00" onblur="formatCurrencyField(this)" ${disabled} />
       </div>
       <div class="audit-field">
         <label for="audit-regulated-${safe}">Valor regulado</label>
-        <input id="audit-regulated-${safe}" type="text" inputmode="decimal" value="${escHtml(review.regulatedValue||review.releasedValue||'')}" placeholder="R$ 0,00" ${disabled} />
+        <input id="audit-regulated-${safe}" type="text" inputmode="decimal" value="${escHtml(formatCurrencyDisplay(review.regulatedValue||review.releasedValue||''))}" placeholder="R$ 0,00" onblur="formatCurrencyField(this)" ${disabled} />
       </div>
       <div class="audit-field">
         <label for="audit-divergence-${safe}">Divergência aprovada</label>
-        <input id="audit-divergence-${safe}" type="text" value="${escHtml(review.approvedDivergence||'')}" placeholder="Opcional" ${disabled} />
+        <input id="audit-divergence-${safe}" type="text" inputmode="decimal" value="${escHtml(formatCurrencyDisplay(review.approvedDivergence||''))}" placeholder="R$ 0,00" onblur="formatCurrencyField(this)" ${disabled} />
       </div>
       <div class="audit-field">
         <div class="audit-question">Teve erros?</div>
@@ -5515,14 +5601,17 @@ async function saveAuditEntry(safe){
   }
   const proc=(document.getElementById(`audit-proc-${safe}`)?.value||'').trim();
   if(!proc){ alert('Informe o número do protocolo.'); return; }
+  const regulatedAt=document.getElementById(`audit-regulated-at-${safe}`)?.value || '';
+  if(!regulatedAt){ alert('Informe a data em que o orçamento foi regulado pelo regulador.'); return; }
   const hasErrors=getRadioValue(`audit-has-errors-${safe}`) || 'Não';
   const errorType=document.getElementById(`audit-error-type-${safe}`)?.value || '';
   const saved=await setAuditReview(proc,{
     assoc:document.getElementById(`audit-assoc-${safe}`)?.value || '',
     reg:document.getElementById(`audit-reg-${safe}`)?.value || '',
-    shopValue:document.getElementById(`audit-shop-${safe}`)?.value.trim() || '',
-    regulatedValue:document.getElementById(`audit-regulated-${safe}`)?.value.trim() || '',
-    approvedDivergence:document.getElementById(`audit-divergence-${safe}`)?.value.trim() || '',
+    regulatedAt,
+    shopValue:normalizeCurrencyValue(document.getElementById(`audit-shop-${safe}`)?.value || ''),
+    regulatedValue:normalizeCurrencyValue(document.getElementById(`audit-regulated-${safe}`)?.value || ''),
+    approvedDivergence:normalizeCurrencyValue(document.getElementById(`audit-divergence-${safe}`)?.value || ''),
     hasErrors,
     errorType:hasErrors==='Sim' ? errorType : '',
     errorDescription:document.getElementById(`audit-error-desc-${safe}`)?.value.trim() || '',
@@ -5677,8 +5766,7 @@ function renderDelayDailyReport(d, dateKey){
 }
 
 function dailyProductivityRows(dateKey){
-  const releases=loadJson(RELEASES_KEY, [])
-    .filter(r=>r.dateKey===dateKey && !r.ignored && isRegulationRelease(r));
+  const releases=auditRegulationItemsForDate(dateKey);
   const audits=auditReportForDate(dateKey).map(item=>item.review);
   const byReg=new Map();
   function rowFor(reg){
@@ -5718,8 +5806,9 @@ function dailyProductivityRows(dateKey){
 }
 
 function dailyReportSnapshotRows(dateKey, mode){
-  const releases=loadJson(RELEASES_KEY, [])
-    .filter(r=>r.dateKey===dateKey && !r.ignored && isRegulationRelease(r));
+  const releases=mode==='delays'
+    ? loadJson(RELEASES_KEY, []).filter(r=>r.dateKey===dateKey && !r.ignored && isRegulationRelease(r))
+    : auditRegulationItemsForDate(dateKey);
   if(mode==='delays'){
     return releases
       .filter(r=>delayValidated(r))
@@ -5807,8 +5896,7 @@ function dailyReportExportHtml(){
   if(currentReportMode==='audit') return renderAuditDailyReport(d, dateKey);
   if(currentReportMode==='delays') return renderDelayDailyReport(d, dateKey);
   return (() => {
-    const allReleases=loadJson(RELEASES_KEY, []).filter(r=>r.dateKey===dateKey);
-    const releases=filterDailyReleases(allReleases.filter(r=>!r.ignored && isRegulationRelease(r)));
+    const releases=filterDailyReleases(auditRegulationItemsForDate(dateKey));
     const byGroup=new Map();
     for(const r of releases){
       const name=reportGroupName(r);
@@ -5851,8 +5939,7 @@ function renderDailyReport(){
     return;
   }
 
-  const allReleases=loadJson(RELEASES_KEY, []).filter(r=>r.dateKey===dateKey);
-  const releases=filterDailyReleases(allReleases.filter(r=>!r.ignored && isRegulationRelease(r)));
+  const releases=filterDailyReleases(auditRegulationItemsForDate(dateKey));
   const byGroup=new Map();
   for(const r of releases){
     const name=reportGroupName(r);
@@ -5978,6 +6065,21 @@ function parseMoney(value){
 
 function fmtMoney(value){
   return value.toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
+}
+
+function formatCurrencyDisplay(value){
+  if(value===null || value===undefined || String(value).trim()==='') return '';
+  return fmtMoney(parseMoney(value));
+}
+
+function normalizeCurrencyValue(value){
+  if(value===null || value===undefined || String(value).trim()==='') return '';
+  return fmtMoney(parseMoney(value));
+}
+
+function formatCurrencyField(el){
+  if(!el) return;
+  el.value=normalizeCurrencyValue(el.value);
 }
 
 function monthResetMs(key, monthKey){
@@ -6121,11 +6223,11 @@ function markNotDelay(id){
 
 function rankingRowsForMonth(monthKey){
   const resetMs=monthResetMs(RANKING_RESET_KEY,monthKey);
-  const releases=loadJson(RELEASES_KEY, [])
-    .filter(r=>!r.ignored && isRegulationRelease(r) && String(r.dateKey||'').startsWith(monthKey) && afterReset(r.completedAt,resetMs));
-  const reviews=getAuditReviews();
+  const releases=auditRegulationItemsForMonth(monthKey).filter(r=>afterReset(r.completedAt,resetMs));
+  const releaseHistory=new Map(loadJson(RELEASES_KEY, [])
+    .filter(r=>!r.ignored && isRegulationRelease(r))
+    .map(r=>[auditReviewKey(r.proc), r]));
   const byReg=new Map();
-  const releaseReviewKeys=new Set();
 
   for(const name of REGULATORS){
     byReg.set(name, {reg:name, released:0, noErrors:0, onTime:0, late:0, errors:0, audited:0, points:0});
@@ -6135,11 +6237,11 @@ function rankingRowsForMonth(monthKey){
     const reg=releaseRegName(r);
     if(!byReg.has(reg)) byReg.set(reg, {reg, released:0, noErrors:0, onTime:0, late:0, errors:0, audited:0, points:0});
     const row=byReg.get(reg);
-    const review=reviews[auditReviewKey(r.proc)];
-    releaseReviewKeys.add(auditReviewKey(r.proc));
+    const review=r.review || {};
     const noErr=review ? reviewHasNoErrors(review) : false;
     const hasErr=review ? auditReviewHasErrors(review) : false;
-    const late=delayValidated(r);
+    const history=releaseHistory.get(auditReviewKey(r.proc));
+    const late=history ? delayValidated(history) : false;
     row.released++;
     if(late) row.late++; else row.onTime++;
     if(review && auditReviewDate(review)) row.audited++;
@@ -6150,22 +6252,8 @@ function rankingRowsForMonth(monthKey){
     if(noErr && !late) row.points+=1;
     if(hasErr && late) row.points-=2;
   }
-  for(const review of Object.values(reviews)){
-    if(!review || !auditReviewDate(review)) continue;
-    if(releaseReviewKeys.has(auditReviewKey(review.proc))) continue;
-    const d=new Date(auditReviewDate(review));
-    const rMonth=`${d.getFullYear()}-${p2(d.getMonth()+1)}`;
-    if(rMonth!==monthKey || !afterReset(auditReviewDate(review),resetMs)) continue;
-    const reg=auditReviewRegName(review);
-    if(!byReg.has(reg)) byReg.set(reg, {reg, released:0, noErrors:0, onTime:0, late:0, errors:0, audited:0, points:0});
-    const row=byReg.get(reg);
-    row.audited++;
-    if(reviewHasNoErrors(review)){ row.noErrors++; row.points+=1; }
-    if(auditReviewHasErrors(review)){ row.errors++; row.points-=1; }
-  }
-
   return [...byReg.values()]
-    .filter(row=>row.released>0 || row.audited>0)
+    .filter(row=>row.released>0)
     .sort((a,b)=>
       b.points-a.points ||
       b.released-a.released ||
@@ -6177,9 +6265,11 @@ function rankingRowsForMonth(monthKey){
 
 function rankingDetailForReg(monthKey, reg){
   const resetMs=monthResetMs(RANKING_RESET_KEY,monthKey);
-  const releases=loadJson(RELEASES_KEY, [])
-    .filter(r=>!r.ignored && isRegulationRelease(r) && String(r.dateKey||'').startsWith(monthKey) && releaseRegName(r)===reg && afterReset(r.completedAt,resetMs));
-  const reviews=getAuditReviews();
+  const releases=auditRegulationItemsForMonth(monthKey)
+    .filter(r=>releaseRegName(r)===reg && afterReset(r.completedAt,resetMs));
+  const releaseHistory=new Map(loadJson(RELEASES_KEY, [])
+    .filter(r=>!r.ignored && isRegulationRelease(r))
+    .map(r=>[auditReviewKey(r.proc), r]));
   const errorCounts=new Map();
   let audited=0;
   let noErrors=0;
@@ -6188,8 +6278,9 @@ function rankingDetailForReg(monthKey, reg){
   let timedCount=0;
 
   for(const r of releases){
-    if(r.chegadaMs && r.completedAt){
-      const hours=bizHrs(new Date(r.chegadaMs), new Date(r.completedAt));
+    const history=releaseHistory.get(auditReviewKey(r.proc));
+    if(history && history.chegadaMs && history.completedAt){
+      const hours=bizHrs(new Date(history.chegadaMs), new Date(history.completedAt));
       if(Number.isFinite(hours) && hours>=0){
         totalHours+=hours;
         timedCount++;
@@ -6197,7 +6288,7 @@ function rankingDetailForReg(monthKey, reg){
     }
 
     if(isApvsAssociation(r)) continue;
-    const review=reviews[auditReviewKey(r.proc)];
+    const review=r.review || {};
     if(!review || !auditReviewDate(review)) continue;
     audited++;
     releasedValue+=parseMoney(review.releasedValue);
@@ -6214,7 +6305,10 @@ function rankingDetailForReg(monthKey, reg){
   const topErrors=[...errorCounts.entries()]
     .sort((a,b)=>b[1]-a[1] || a[0].localeCompare(b[0]))
     .slice(0,4);
-  const onTime=releases.filter(r=>!delayValidated(r)).length;
+  const onTime=releases.filter(r=>{
+    const history=releaseHistory.get(auditReviewKey(r.proc));
+    return history ? !delayValidated(history) : true;
+  }).length;
   const late=releases.length-onTime;
   return {
     reg,
@@ -6379,13 +6473,12 @@ function selectedMonthlyKey(){
 }
 
 function monthReleases(monthKey){
-  return loadJson(RELEASES_KEY, [])
-    .filter(r=>!r.ignored && isRegulationRelease(r) && String(r.dateKey||'').startsWith(monthKey));
+  return auditRegulationItemsForMonth(monthKey);
 }
 
 function monthAuditItems(monthKey, releases){
   const byProc=new Map();
-  for(const r of loadJson(RELEASES_KEY, []).filter(r=>!r.ignored)){
+  for(const r of (releases && releases.length ? releases : auditRegulationItemsForMonth(monthKey))){
     byProc.set(auditReviewKey(r.proc), r);
   }
   return Object.entries(getAuditReviews())
@@ -6436,11 +6529,15 @@ function monthlySummaryData(monthKey){
   const budgetSizesByReg=new Map();
   const valuesByAssoc=new Map();
   const delayByAssoc=new Map();
+  const releaseHistory=new Map(loadJson(RELEASES_KEY, [])
+    .filter(r=>!r.ignored && isRegulationRelease(r))
+    .map(r=>[auditReviewKey(r.proc), r]));
   let onTime=0, late=0, apvs=0;
   let audited=audits.length, withErrors=0, noErrors=0, receivedValueTotal=0, regulatedValueTotal=0, reductionTotal=0;
 
   for(const r of releases){
-    const expired=delayValidated(r);
+    const history=releaseHistory.get(auditReviewKey(r.proc));
+    const expired=history ? delayValidated(history) : false;
     if(expired) late++; else onTime++;
     if(isApvsAssociation(r)) apvs++;
 
@@ -6454,7 +6551,7 @@ function monthlySummaryData(monthKey){
     if(expired){
       const d=addMetric(delayByAssoc, releaseAssocName(r), {count:0,hours:0});
       d.count++;
-      d.hours+=delayHours(r);
+      d.hours+=history ? delayHours(history) : 0;
     }
   }
   const auditDays=new Set(audits.map(({review})=>dk(new Date(auditReviewDate(review)))));
@@ -6464,7 +6561,7 @@ function monthlySummaryData(monthKey){
       proc:r.proc,
       reg:releaseRegName(r),
       assoc:releaseAssocName(r),
-      arrival:r.chegadaText||'',
+      arrival:releaseHistory.get(auditReviewKey(r.proc))?.chegadaText || '',
       released:fmtAuditDate(r.completedAt),
       auditDate:auditReviewDate(review)?fmtAuditDate(auditReviewDate(review)):'',
       error:auditReviewHasErrors(review)?'Sim':'Não',
@@ -6474,24 +6571,6 @@ function monthlySummaryData(monthKey){
       reduction:auditReviewReduction(review),
     };
   });
-  const releaseKeys=new Set(protocolRows.map(r=>auditReviewKey(r.proc)));
-  for(const {review} of audits){
-    if(releaseKeys.has(auditReviewKey(review.proc))) continue;
-    protocolRows.push({
-      proc:review.proc,
-      reg:auditReviewRegName(review),
-      assoc:auditReviewAssocName(review),
-      arrival:'',
-      released:'',
-      auditDate:fmtAuditDate(auditReviewDate(review)),
-      error:auditReviewHasErrors(review)?'Sim':'Não',
-      errorType:auditReviewHasErrors(review)?auditReviewErrorType(review):'Sem erros',
-      received:auditReviewShopValue(review),
-      regulated:auditReviewRegulatedValue(review),
-      reduction:auditReviewReduction(review),
-    });
-  }
-
   for(const {review} of audits){
     const regName=auditReviewRegName(review);
     const assocName=auditReviewAssocName(review);
@@ -6778,7 +6857,7 @@ function monthlyProtocolsHtml(data){
     {label:'Redução', value:r=>fmtMoney(r.reduction), num:true},
   ];
   return `
-    <div class="monthly-cover"><h2>Protocolos de ${escHtml(monthLabel(data.monthKey))}</h2><p>Todos os dados por processo</p></div>
+    <div class="monthly-cover"><h2>Protocolos liberados de ${escHtml(monthLabel(data.monthKey))}</h2><p>Somente liberações de regulagem</p></div>
     <div class="monthly-tabs">
       <button class="btn btn-ghost" onclick="setMonthlyView('summary')">Voltar ao resumo</button>
     </div>
@@ -7066,8 +7145,8 @@ function saveReleaseDeadline(id, safe){
 function openReportGroup(kind, groupName, dateKey){
   const slot=document.getElementById('report-detail-slot');
   if(!slot) return;
-  const releases=loadJson(RELEASES_KEY, [])
-    .filter(r=>!r.ignored && isRegulationRelease(r) && r.dateKey===dateKey && (kind==='association' ? releaseAssocName(r)===groupName : releaseRegName(r)===groupName))
+  const releases=auditRegulationItemsForDate(dateKey)
+    .filter(r=>(kind==='association' ? releaseAssocName(r)===groupName : releaseRegName(r)===groupName))
     .sort((a,b)=>String(a.completedAt||'').localeCompare(String(b.completedAt||'')));
   const detailLabel=kind==='association'?'associação':'regulador';
 
@@ -7318,7 +7397,7 @@ async function syncNow(){
   _lastRenderedData=data;
   await syncSharedAudits();
   if(sharedDbReady){
-    recordDailyReleases(data.all);
+    await recordDailyReleases(data.all);
     await syncSharedAudits();
   }
   renderDailyReport();
