@@ -4078,7 +4078,7 @@ function refreshCurrentUserUi(){
   const auditResetBtn=document.getElementById('audit-reset-btn');
   if(auditResetBtn) auditResetBtn.style.display=isLidiane()?'inline-flex':'none';
 }
-function loginUser(){
+async function loginUser(){
   const user=document.getElementById('login-user').value;
   const pass=document.getElementById('login-password').value;
   const msg=document.getElementById('login-msg');
@@ -4092,7 +4092,7 @@ function loginUser(){
   document.getElementById('login-password').value='';
   document.getElementById('login-overlay').classList.remove('open');
   refreshCurrentUserUi();
-  syncSharedAudits();
+  await syncSharedAudits();
   if(pendingLoginPage){
     const page=pendingLoginPage;
     pendingLoginPage='';
@@ -4128,13 +4128,10 @@ function jsonp(url){
   });
 }
 function mergeSharedAuditReviews(rows){
-  const resetAt=Number(localStorage.getItem(AUDIT_RESET_AT_KEY)||0);
   const next={};
   for(const row of rows||[]){
     const key=auditReviewKey(row.proc);
     if(!key) continue;
-    const rowTime=new Date(row.updatedAt || row.auditReleasedAt || row.releasedAt || '').getTime();
-    if(resetAt && (!rowTime || rowTime<resetAt)) continue;
     next[key]=row;
   }
   const changed=JSON.stringify(getAuditReviews())!==JSON.stringify(next);
@@ -4225,13 +4222,10 @@ function safeJson(value, fallback){
 }
 function mergeSharedAuditReviewsOld(rows){
   const local=getAuditReviews();
-  const resetAt=Number(localStorage.getItem(AUDIT_RESET_AT_KEY)||0);
   let changed=false;
   for(const row of rows||[]){
     const key=auditReviewKey(row.proc);
     if(!key) continue;
-    const rowTime=new Date(row.updatedAt || row.auditReleasedAt || row.releasedAt || '').getTime();
-    if(resetAt && (!rowTime || rowTime<resetAt)) continue;
     const previous=local[key];
     if(!previous || String(row.updatedAt||'')>String(previous.updatedAt||'')){
       local[key]=row;
@@ -4339,7 +4333,6 @@ function mergeSharedResets(rows){
   const daily=loadJson(DAILY_RESET_KEY,{});
   const ranking=loadJson(RANKING_RESET_KEY,{});
   const monthly=loadJson(MONTHLY_RESET_KEY,{});
-  let auditReset=Number(localStorage.getItem(AUDIT_RESET_AT_KEY)||0);
   for(const row of rows||[]){
     const resetAt=new Date(row.resetAt||'').getTime() || Number(row.resetAt||0);
     if(!resetAt) continue;
@@ -4363,11 +4356,6 @@ function mergeSharedResets(rows){
     }
     if(type==='monthly' && row.monthKey && (!monthly[row.monthKey] || monthly[row.monthKey]<resetAt)){
       monthly[row.monthKey]=resetAt;
-      changed=true;
-    }
-    if(type==='audit' && resetAt>auditReset){
-      auditReset=resetAt;
-      localStorage.setItem(AUDIT_RESET_AT_KEY, String(resetAt));
       changed=true;
     }
   }
@@ -4407,19 +4395,6 @@ function applySharedResetFilters(){
     return changedAt && changedAt>=resetAt;
   });
   if(kept.length!==releases.length) saveJson(RELEASES_KEY, kept);
-  const auditReset=Number(localStorage.getItem(AUDIT_RESET_AT_KEY)||0);
-  if(auditReset){
-    const reviews=getAuditReviews();
-    let changed=false;
-    for(const [key,review] of Object.entries(reviews)){
-      const changedAt=new Date(review.updatedAt || review.auditReleasedAt || '').getTime();
-      if(!changedAt || changedAt<auditReset){
-        delete reviews[key];
-        changed=true;
-      }
-    }
-    if(changed) saveJson(AUDIT_REVIEWS_KEY, reviews);
-  }
 }
 async function syncSharedAudits(){
   const url=auditApiUrl();
@@ -6145,13 +6120,13 @@ function resetDailyReport(){
 }
 async function resetAuditData(){
   if(!isLidiane()){ alert('Somente Lidiane pode reiniciar os dados da auditoria.'); return; }
-  if(!confirm('Tem certeza que deseja reiniciar os dados da auditoria neste computador? Registros antigos sincronizados serão ignorados a partir de agora.')) return;
+  if(!confirm('Tem certeza que deseja reiniciar os dados da auditoria para todos os usuários? Os registros serão apagados do banco de dados compartilhado.')) return;
   saveJson(AUDIT_REVIEWS_KEY,{});
-  localStorage.setItem(AUDIT_RESET_AT_KEY, String(Date.now()));
+  localStorage.removeItem(AUDIT_RESET_AT_KEY);
   pushSharedReset('audit');
   try{
     const url=auditApiUrl();
-    if(url) await jsonp(`${url}?action=reset`);
+    if(url) await jsonp(`${url}?action=reset&user=${encodeURIComponent(currentUser() || '')}`);
   }catch(e){}
   currentAuditAssoc='__all__';
   currentAuditQuery='';
@@ -7280,7 +7255,7 @@ function render({atr,hoj,ama,dem,total}){
 }
 
 // ─── PAGE NAVIGATION ─────────────────────────────────────────────
-function showPage(page){
+async function showPage(page){
   const validPages=['dashboard','report','audit','sync','ranking','monthly'];
   if(!validPages.includes(page)) page='dashboard';
   if(page!=='dashboard' && !currentUser()){
@@ -7293,7 +7268,7 @@ function showPage(page){
   const isSync=page==='sync';
   const isRanking=page==='ranking';
   const isMonthly=page==='monthly';
-  if(page!=='dashboard') syncSharedAudits();
+  if(page!=='dashboard') await syncSharedAudits();
   document.getElementById('main').classList.toggle('active', !isReport && !isAudit && !isSync && !isRanking && !isMonthly);
   document.getElementById('report-page').classList.toggle('active', isReport);
   document.getElementById('audit-page').classList.toggle('active', isAudit);
@@ -7541,6 +7516,7 @@ document.addEventListener('keydown', e => {
 // ─── INIT ────────────────────────────────────────────────────────
 
 (async function(){
+  localStorage.removeItem(AUDIT_RESET_AT_KEY);
   localStorage.setItem('painel_gs_url', DEFAULT_URL);
   localStorage.setItem(AUDIT_API_URL_KEY, DEFAULT_AUDIT_API_URL);
   document.getElementById('url-input').value=DEFAULT_URL;
@@ -7561,6 +7537,14 @@ document.addEventListener('keydown', e => {
   clearInterval(sharedAuditSyncTimer);
   sharedAuditSyncTimer=setInterval(syncSharedAudits,30000);
 })();
+
+window.addEventListener('focus', async ()=>{
+  await syncSharedAudits();
+  renderDailyReport();
+  renderAudit();
+  renderRanking();
+  renderMonthlySummary();
+});
 </script>
 </body>
 </html>
